@@ -1,17 +1,32 @@
 #include "Grid.h"
 #include <stdexcept>
+#include <limits>
 
-Grid::Grid(int n) : size(n), people(static_cast<std::size_t>(n) * static_cast<std::size_t>(n)){
-if(n<=0) {
+namespace {
+
+std::size_t checkedCellCount(int n) {
+	if(n<=0) {
 throw std::invalid_argument("Grid size must be positive");
-}}
+}
+const std::size_t size = static_cast<std::size_t>(n);
 
-int Grid:: get Size() const {
+if(size > std::numeric_limits<std::size_t>::max()/size) {
+throw std::length_error("Grid is too large");
+}
+
+return size * size;
+}
+}
+
+Grid::Grid(int n) : size(n), people(checkedCellCount(n)) {
+}
+
+int Grid:: getSize() const {
 return size;
 }
 
 Person& Grid::at(int row, int col) {
-if (row<0 || row>=size || col<0 }} col>=size) {
+if (row<0 || row>=size || col<0 || col>=size) {
 throw std::out_of_range("Grid position out of range");
 }
 
