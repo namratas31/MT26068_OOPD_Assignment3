@@ -180,12 +180,7 @@ DailyStats Simulation::simulateDay(
             1.0 - std::pow(1.0 - betaEffective, k);
     }
 
-    /*
-     * Update one cell.
-     *
-     * Every cell reads only from current and writes only
-     * to its own position in next.
-     */
+    
     auto updateCell = [&](int row, int col,
                           LocalCounts& counts) {
 
@@ -265,9 +260,6 @@ DailyStats Simulation::simulateDay(
     };
 
 
-    /*
-     * Process one row range.
-     */
     auto processRows = [&](int rowStart,
                            int rowEnd,
                            int colStart,
@@ -282,19 +274,6 @@ DailyStats Simulation::simulateDay(
     };
 
 
-    /*
-     * Process one logical task.
-     *
-     * Strips:
-     *   Each task receives a contiguous strip of rows.
-     *
-     * Blocks:
-     *   The grid is divided into approximately square blocks.
-     *
-     * Interleaved:
-     *   Rows are assigned in strides of T. When C differs
-     *   from T, a task can handle more than one row lane.
-     */
     auto processChunk = [&](std::size_t taskIndex)
         -> LocalCounts {
 
@@ -401,19 +380,13 @@ DailyStats Simulation::simulateDay(
     std::vector<LocalCounts> taskCounts(chunkCount);
 
 
-    /*
-     * Mode 1: Sequential version.
-     */
+
     if (config.executionMode == ExecutionMode::Sequential) {
 
         processRows(0, n, 0, n, taskCounts[0]);
     }
 
 
-    /*
-     * Mode 2: Create C threads every day.
-     * Each thread processes one row strip.
-     */
     else if (config.executionMode ==
              ExecutionMode::PerDayThreads) {
 
@@ -446,10 +419,6 @@ DailyStats Simulation::simulateDay(
     }
 
 
-    /*
-     * Mode 3: Reusable thread pool.
-     * Submit C tasks to T persistent worker threads.
-     */
     else if (config.executionMode == ExecutionMode::ThreadPool) {
 
         std::vector<std::future<LocalCounts>> futures;
@@ -484,16 +453,9 @@ DailyStats Simulation::simulateDay(
     }
 
 
-    /*
-     * All threads/tasks have finished here.
-     * It is now safe to swap the grids.
-     */
     std::swap(current, next);
 
 
-    /*
-     * Combine local counts on the main thread.
-     */
     DailyStats stats;
 
     stats.day = day;
@@ -561,13 +523,30 @@ void Simulation::run(const std::string& csvFilename) {
     stats.day = 0;
     stats.betaEffective = betaEffective;
 
-    for (int row = 0; row < config.gridSize; ++row) {
+        for (int row = 0; row < config.gridSize; ++row) {
         for (int col = 0; col < config.gridSize; ++col) {
 
-            countState(
-                *reinterpret_cast<LocalCounts*>(&stats),
-                current.at(row, col).state
-            );
+            switch (current.at(row, col).state) {
+                case State::Susceptible:
+                    ++stats.susceptible;
+                    break;
+
+                case State::Infected:
+                    ++stats.infected;
+                    break;
+
+                case State::Recovered:
+                    ++stats.recovered;
+                    break;
+
+                case State::Vaccinated:
+                    ++stats.vaccinated;
+                    break;
+
+                case State::Dead:
+                    ++stats.dead;
+                    break;
+            }
         }
     }
 
