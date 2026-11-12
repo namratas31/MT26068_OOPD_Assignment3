@@ -9,6 +9,7 @@
 #include <memory>
 #include <string>
 
+// Part B grid partition methods.
 enum class GridDivision {
     Strips,
     Blocks,
@@ -38,31 +39,45 @@ struct SimulationConfig {
     double lockdownOn = 0.02;
     double lockdownOff = 0.005;
 
-    // Part B parameters
+    // Part B settings.
     std::size_t threadCount = 4;
     std::size_t chunks = 16;
-
     GridDivision division = GridDivision::Strips;
     ExecutionMode executionMode = ExecutionMode::ThreadPool;
+
+    // Part C1 snapshot settings.
+    int snapshotEvery = 0;
+    bool asyncSnapshots = false;
+    std::size_t maxPendingSnapshots = 2;
+    int ioLatencyMs = 0;
+    std::string snapshotPrefix = "results/snapshot";
 };
 
 struct DailyStats {
     int day = 0;
-
     std::size_t susceptible = 0;
     std::size_t infected = 0;
     std::size_t recovered = 0;
     std::size_t vaccinated = 0;
     std::size_t dead = 0;
+    std::size_t newlyInfected = 0;
 
     double betaEffective = 0.0;
     std::uint64_t checksum = 0;
 };
 
+// Summary returned by each independent parameter-sweep run.
+struct SimulationSummary {
+    double peakInfectedFraction = 0.0;
+    int peakDay = 0;
+    std::size_t totalInfected = 0;
+    std::size_t totalDeaths = 0;
+    int daysSimulated = 0;
+};
+
 class Simulation {
 private:
     SimulationConfig config;
-
     Grid current;
     Grid next;
 
@@ -80,7 +95,10 @@ private:
 public:
     explicit Simulation(const SimulationConfig& settings);
 
-    void run(const std::string& csvFilename);
+    SimulationSummary run(
+        const std::string& csvFilename,
+        bool writeCsv = true
+    );
 };
 
 #endif
