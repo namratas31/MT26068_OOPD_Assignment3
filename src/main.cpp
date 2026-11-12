@@ -346,18 +346,19 @@ int main(int argc, char* argv[]) {
         std::string csvFilename = "results/simulation.csv";
 
         bool sweepMode = false;
+        bool benchmarkMode = false;
 
         std::vector<double> sweepBetas{
-            0.04, 0.08, 0.12
-        };
+    0.04, 0.06, 0.08, 0.10
+};
 
-        std::vector<double> sweepVaccinations{
-            0.0, 0.2, 0.4
-        };
+std::vector<double> sweepVaccinations{
+    0.0, 0.1, 0.2, 0.3
+};
 
-        std::vector<std::uint64_t> sweepSeeds{
-            42, 43, 44
-        };
+std::vector<std::uint64_t> sweepSeeds{
+    41, 42
+};
 
         std::size_t sweepWorkers = 4;
         double sweepTimeLimit = 0.0;
@@ -429,6 +430,12 @@ int main(int argc, char* argv[]) {
                 config.chunks =
                     std::stoull(getValue(i, argc, argv));
             }
+                else if (arg == "--benchmark") {
+    benchmarkMode = true;
+}
+else if (arg == "--fixed-days") {
+    config.stopWhenNoInfected = false;
+}
             else if (arg == "--division") {
                 const std::string value =
                     getValue(i, argc, argv);
@@ -551,21 +558,28 @@ int main(int argc, char* argv[]) {
 
         Simulation simulation(config);
 
-        const SimulationSummary summary =
-            simulation.run(csvFilename, true);
+const SimulationSummary summary =
+    simulation.run(csvFilename, !benchmarkMode);
 
-        std::cout
-            << "Peak infected fraction: "
-            << summary.peakInfectedFraction
-            << " on day " << summary.peakDay << '\n'
-            << "Total infected: "
-            << summary.totalInfected << '\n'
-            << "Total deaths: "
-            << summary.totalDeaths << '\n'
-            << "Days simulated: "
-            << summary.daysSimulated << '\n';
+if (benchmarkMode) {
+    std::cout
+        << "BENCHMARK_SECONDS="
+        << summary.elapsedSeconds << '\n';
+}
+else {
+    std::cout
+        << "Peak infected fraction: "
+        << summary.peakInfectedFraction
+        << " on day " << summary.peakDay << '\n'
+        << "Total infected: "
+        << summary.totalInfected << '\n'
+        << "Total deaths: "
+        << summary.totalDeaths << '\n'
+        << "Days simulated: "
+        << summary.daysSimulated << '\n';
+}
 
-        return 0;
+return 0;
     }
     catch (const std::exception& error) {
         std::cerr
