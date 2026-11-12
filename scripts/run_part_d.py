@@ -132,7 +132,7 @@ def hardware_details():
             logical = int(values["CPU(s)"])
 
             physical = (
-                int(values["Core(s) per socket)")
+                int(values["Core(s) per socket"])
                 * int(values["Socket(s)"])
             )
         except (KeyError, ValueError):
