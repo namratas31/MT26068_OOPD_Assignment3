@@ -51,6 +51,8 @@ struct SimulationConfig {
     std::size_t maxPendingSnapshots = 2;
     int ioLatencyMs = 0;
     std::string snapshotPrefix = "results/snapshot";
+
+bool stopWhenNoInfected = true;
 };
 
 struct DailyStats {
@@ -73,6 +75,8 @@ struct SimulationSummary {
     std::size_t totalInfected = 0;
     std::size_t totalDeaths = 0;
     int daysSimulated = 0;
+double elapsedSeconds = 0.0;
+
 };
 
 class Simulation {
