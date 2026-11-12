@@ -493,7 +493,10 @@ SimulationSummary Simulation::run(const std::string& csvFilename,
             }
         ));
     };
-
+        
+const auto benchmarkStart =
+    std::chrono::steady_clock::now();
+        
     for (int day = 1; day <= config.maxDays; ++day) {
         stats = simulateDay(day, betaEffective);
 
@@ -530,13 +533,20 @@ SimulationSummary Simulation::run(const std::string& csvFilename,
             betaEffective = config.beta * config.maskFactor;
         }
 
-        if (stats.infected == 0) break;
+        if (config.stopWhenNoInfected && stats.infected == 0) {
+    break;
+}
     }
 
     // Wait for every pending snapshot, even if one writer failed.
     while (!pendingSnapshots.empty()) {
         waitOldestSnapshot();
     }
+
+        summary.elapsedSeconds =
+    std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - benchmarkStart
+    ).count();
     if (snapshotError) std::rethrow_exception(snapshotError);
 
     if (writeCsv) {
