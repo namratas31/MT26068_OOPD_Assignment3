@@ -3,237 +3,626 @@
 
 #include <algorithm>
 #include <cmath>
+#include <exception>
 #include <fstream>
 #include <iostream>
 #include <numeric>
 #include <stdexcept>
+#include <thread>
 #include <vector>
 
+namespace {
+
+struct LocalCounts {
+    std::size_t susceptible = 0;
+    std::size_t infected = 0;
+    std::size_t recovered = 0;
+    std::size_t vaccinated = 0;
+    std::size_t dead = 0;
+};
+
+void countState(LocalCounts& counts, State state) {
+    switch (state) {
+        case State::Susceptible:
+            ++counts.susceptible;
+            break;
+
+        case State::Infected:
+            ++counts.infected;
+            break;
+
+        case State::Recovered:
+            ++counts.recovered;
+            break;
+
+        case State::Vaccinated:
+            ++counts.vaccinated;
+            break;
+
+        case State::Dead:
+            ++counts.dead;
+            break;
+    }
+}
+
+} // namespace
+
+
 Simulation::Simulation(const SimulationConfig& settings)
-:config(settings), current(settings.gridSize), next(settings.gridSize) {
+    : config(settings),
+      current(settings.gridSize),
+      next(settings.gridSize) {
 
-if(config.gridSize <=0 || config.maxDays <0 || config.infectiousDays <=0 || config.initiallyInfected < 0 ||
-config.beta < 0.0 || config.beta > 1.0 || config.mortality < 0.0 || config.mortality > 1.0 || 
-config.vaccinatedFraction < 0.0 || config.vaccinatedFraction > 1.0 || config.maskFactor <= 0.0 ||
-config.maskFactor > 1.0 || config.lockdownFactor < 0.0 || config.lockdownFactor > 1.0 ||
-config.lockdownOff < 0.0 || config.lockdownOn > 1.0 || config.lockdownOff > config.lockdownOn) {
-throw std::invalid_argument("Invalid simulation parameters");
+    if (config.gridSize <= 0 ||
+        config.maxDays < 0 ||
+        config.infectiousDays <= 0 ||
+        config.initiallyInfected < 0 ||
+        config.beta < 0.0 || config.beta > 1.0 ||
+        config.mortality < 0.0 || config.mortality > 1.0 ||
+        config.vaccinatedFraction < 0.0 ||
+        config.vaccinatedFraction > 1.0 ||
+        config.maskFactor <= 0.0 ||
+        config.maskFactor > 1.0 ||
+        config.lockdownFactor < 0.0 ||
+        config.lockdownFactor > 1.0 ||
+        config.lockdownOn < 0.0 ||
+        config.lockdownOn > 1.0 ||
+        config.lockdownOff < 0.0 ||
+        config.lockdownOff > config.lockdownOn ||
+        config.threadCount == 0 ||
+        config.chunks == 0) {
+
+        throw std::invalid_argument(
+            "Invalid simulation parameters"
+        );
+    }
+
+    if (config.executionMode == ExecutionMode::PerDayThreads &&
+        config.division != GridDivision::Strips) {
+
+        throw std::invalid_argument(
+            "Per-day thread mode supports row strips only"
+        );
+    }
+
+    if (config.executionMode == ExecutionMode::ThreadPool) {
+        pool = std::make_unique<ThreadPool>(
+            config.threadCount
+        );
+    }
+
+    initialize();
 }
 
-initialize();
-}
 
 void Simulation::initialize() {
-const int n = config.gridSize;
-const std::size_t total =
-static_cast<std::size_t>(n) * static_cast<std::size_t>(n);
+    const int n = config.gridSize;
 
-const std::size_t vaccinatedCount =
-static_cast<std::size_t> (
-config.vaccinatedFraction * static_cast<double>(total));
+    const std::size_t total =
+        static_cast<std::size_t>(n) *
+        static_cast<std::size_t>(n);
 
-if (vaccinatedCount +
-static_cast<std::size_t>(config.initiallyInfected) > total) {
-throw std::invalid_argument(
-"Too many vaccinated and initially infected people");
+    const std::size_t vaccinatedCount =
+        static_cast<std::size_t>(
+            config.vaccinatedFraction *
+            static_cast<double>(total)
+        );
+
+    if (vaccinatedCount +
+        static_cast<std::size_t>(config.initiallyInfected) > total) {
+
+        throw std::invalid_argument(
+            "Too many vaccinated and initially infected people"
+        );
+    }
+
+    std::vector<std::size_t> ids(total);
+
+    std::iota(ids.begin(), ids.end(), 0);
+
+    std::sort(
+        ids.begin(),
+        ids.end(),
+        [this](std::size_t a, std::size_t b) {
+            const auto ha = hashRandom(
+                config.seed,
+                0,
+                static_cast<std::uint64_t>(a),
+                2
+            );
+
+            const auto hb = hashRandom(
+                config.seed,
+                0,
+                static_cast<std::uint64_t>(b),
+                2
+            );
+
+            return ha == hb ? a < b : ha < hb;
+        }
+    );
+
+    for (std::size_t i = 0; i < vaccinatedCount; ++i) {
+        const int row = static_cast<int>(ids[i] / n);
+        const int col = static_cast<int>(ids[i] % n);
+
+        current.at(row, col).state = State::Vaccinated;
+    }
+
+    for (int i = 0; i < config.initiallyInfected; ++i) {
+        const std::size_t id =
+            ids[vaccinatedCount + static_cast<std::size_t>(i)];
+
+        const int row = static_cast<int>(id / n);
+        const int col = static_cast<int>(id % n);
+
+        current.at(row, col).state = State::Infected;
+        current.at(row, col).daysInfected = 0;
+    }
+
+    next = current;
 }
 
-std::vector<std::size_t> ids(total);
-std::iota(ids.begin(),ids.end(),0);
 
-std::sort(ids.begin(), ids.end(),
-[this](std::size_t a, std::size_t b) {
-const auto ha = hashRandom(
-config.seed, 0, static_cast <std::uint64_t>(a), 2);
-const auto hb = hashRandom(
-config.seed, 0, static_cast<std::uint64_t>(b), 2);
+DailyStats Simulation::simulateDay(
+    int day,
+    double betaEffective
+) {
+    const int n = config.gridSize;
 
-return ha == hb ? a< b : ha < hb;
-});
+    const std::size_t chunkCount = config.chunks;
+    const std::size_t threadCount = config.threadCount;
+
+    double probabilities[9];
+
+    for (int k = 0; k <= 8; ++k) {
+        probabilities[k] =
+            1.0 - std::pow(1.0 - betaEffective, k);
+    }
+
+    /*
+     * Update one cell.
+     *
+     * Every cell reads only from current and writes only
+     * to its own position in next.
+     */
+    auto updateCell = [&](int row, int col,
+                          LocalCounts& counts) {
+
+        const Person& person = current.at(row, col);
+
+        Person updated = person;
+
+        if (person.state == State::Susceptible) {
+            int infectedNeighbours = 0;
+
+            for (int dr = -1; dr <= 1; ++dr) {
+                for (int dc = -1; dc <= 1; ++dc) {
+
+                    if (dr == 0 && dc == 0) {
+                        continue;
+                    }
+
+                    const int r = row + dr;
+                    const int c = col + dc;
+
+                    if (r >= 0 && r < n &&
+                        c >= 0 && c < n &&
+                        current.at(r, c).state == State::Infected) {
+
+                        ++infectedNeighbours;
+                    }
+                }
+            }
+
+            const std::uint64_t id =
+                static_cast<std::uint64_t>(row) * n + col;
+
+            const double randomValue = random01(
+                config.seed,
+                static_cast<std::uint64_t>(day),
+                id,
+                0
+            );
+
+            if (randomValue <
+                probabilities[infectedNeighbours]) {
+
+                updated.state = State::Infected;
+                updated.daysInfected = 0;
+            }
+        }
+        else if (person.state == State::Infected) {
+
+            updated.daysInfected++;
+
+            if (updated.daysInfected >= config.infectiousDays) {
+
+                const std::uint64_t id =
+                    static_cast<std::uint64_t>(row) * n + col;
+
+                const double randomValue = random01(
+                    config.seed,
+                    static_cast<std::uint64_t>(day),
+                    id,
+                    1
+                );
+
+                if (randomValue < config.mortality) {
+                    updated.state = State::Dead;
+                }
+                else {
+                    updated.state = State::Recovered;
+                }
+
+                updated.daysInfected = 0;
+            }
+        }
+
+        next.at(row, col) = updated;
+
+        countState(counts, updated.state);
+    };
 
 
+    /*
+     * Process one row range.
+     */
+    auto processRows = [&](int rowStart,
+                           int rowEnd,
+                           int colStart,
+                           int colEnd,
+                           LocalCounts& counts) {
 
-for(std::size_t i =0; i<vaccinatedCount; ++i)
-{
-const int row = static_cast<int>(ids[i]/n);
-const int col = static_cast<int>(ids[i] % n);
-current.at(row,col).state = State::Vaccinated;}
+        for (int row = rowStart; row < rowEnd; ++row) {
+            for (int col = colStart; col < colEnd; ++col) {
+                updateCell(row, col, counts);
+            }
+        }
+    };
 
-for(int i=0; i<config.initiallyInfected; ++i){
-const std::size_t id =
-ids[vaccinatedCount + static_cast<std::size_t>(i)];
 
-const int row = static_cast<int>( id /n);
-const int col = static_cast<int>( id % n);
+    /*
+     * Process one logical task.
+     *
+     * Strips:
+     *   Each task receives a contiguous strip of rows.
+     *
+     * Blocks:
+     *   The grid is divided into approximately square blocks.
+     *
+     * Interleaved:
+     *   Rows are assigned in strides of T. When C differs
+     *   from T, a task can handle more than one row lane.
+     */
+    auto processChunk = [&](std::size_t taskIndex)
+        -> LocalCounts {
 
-current.at(row,col).state = State::Infected;
-current.at(row,col).daysInfected = 0;
+        LocalCounts counts;
+
+        if (config.division == GridDivision::Strips) {
+
+            const int rowStart = static_cast<int>(
+                taskIndex * static_cast<std::size_t>(n)
+                / chunkCount
+            );
+
+            const int rowEnd = static_cast<int>(
+                (taskIndex + 1) *
+                static_cast<std::size_t>(n) / chunkCount
+            );
+
+            processRows(
+                rowStart, rowEnd, 0, n, counts
+            );
+        }
+
+        else if (config.division == GridDivision::Interleaved) {
+
+            for (std::size_t lane = taskIndex;
+                 lane < threadCount;
+                 lane += chunkCount) {
+
+                for (std::size_t row = lane;
+                     row < static_cast<std::size_t>(n);
+                     row += threadCount) {
+
+                    processRows(
+                        static_cast<int>(row),
+                        static_cast<int>(row) + 1,
+                        0,
+                        n,
+                        counts
+                    );
+                }
+            }
+        }
+
+        else if (config.division == GridDivision::Blocks) {
+
+            const std::size_t blocksPerSide =
+                static_cast<std::size_t>(
+                    std::ceil(
+                        std::sqrt(
+                            static_cast<double>(chunkCount)
+                        )
+                    )
+                );
+
+            const std::size_t totalBlocks =
+                blocksPerSide * blocksPerSide;
+
+            for (std::size_t block = taskIndex;
+                 block < totalBlocks;
+                 block += chunkCount) {
+
+                const std::size_t blockRow =
+                    block / blocksPerSide;
+
+                const std::size_t blockCol =
+                    block % blocksPerSide;
+
+                const int rowStart = static_cast<int>(
+                    blockRow * static_cast<std::size_t>(n)
+                    / blocksPerSide
+                );
+
+                const int rowEnd = static_cast<int>(
+                    (blockRow + 1) *
+                    static_cast<std::size_t>(n)
+                    / blocksPerSide
+                );
+
+                const int colStart = static_cast<int>(
+                    blockCol * static_cast<std::size_t>(n)
+                    / blocksPerSide
+                );
+
+                const int colEnd = static_cast<int>(
+                    (blockCol + 1) *
+                    static_cast<std::size_t>(n)
+                    / blocksPerSide
+                );
+
+                processRows(
+                    rowStart,
+                    rowEnd,
+                    colStart,
+                    colEnd,
+                    counts
+                );
+            }
+        }
+
+        return counts;
+    };
+
+
+    std::vector<LocalCounts> taskCounts(chunkCount);
+
+
+    /*
+     * Mode 1: Sequential version.
+     */
+    if (config.executionMode == ExecutionMode::Sequential) {
+
+        processRows(0, n, 0, n, taskCounts[0]);
+    }
+
+
+    /*
+     * Mode 2: Create C threads every day.
+     * Each thread processes one row strip.
+     */
+    else if (config.executionMode ==
+             ExecutionMode::PerDayThreads) {
+
+        std::vector<std::thread> workers;
+        std::vector<std::exception_ptr> errors(chunkCount);
+
+        workers.reserve(chunkCount);
+
+        for (std::size_t t = 0; t < chunkCount; ++t) {
+
+            workers.emplace_back([&, t]() {
+                try {
+                    taskCounts[t] = processChunk(t);
+                }
+                catch (...) {
+                    errors[t] = std::current_exception();
+                }
+            });
+        }
+
+        for (std::thread& worker : workers) {
+            worker.join();
+        }
+
+        for (const auto& error : errors) {
+            if (error) {
+                std::rethrow_exception(error);
+            }
+        }
+    }
+
+
+    /*
+     * Mode 3: Reusable thread pool.
+     * Submit C tasks to T persistent worker threads.
+     */
+    else if (config.executionMode == ExecutionMode::ThreadPool) {
+
+        std::vector<std::future<LocalCounts>> futures;
+
+        futures.reserve(chunkCount);
+
+        for (std::size_t t = 0; t < chunkCount; ++t) {
+
+            futures.push_back(
+                pool->submit([&, t]() {
+                    return processChunk(t);
+                })
+            );
+        }
+
+        std::exception_ptr taskError;
+
+        for (std::size_t t = 0; t < futures.size(); ++t) {
+            try {
+                taskCounts[t] = futures[t].get();
+            }
+            catch (...) {
+                if (!taskError) {
+                    taskError = std::current_exception();
+                }
+            }
+        }
+
+        if (taskError) {
+            std::rethrow_exception(taskError);
+        }
+    }
+
+
+    /*
+     * All threads/tasks have finished here.
+     * It is now safe to swap the grids.
+     */
+    std::swap(current, next);
+
+
+    /*
+     * Combine local counts on the main thread.
+     */
+    DailyStats stats;
+
+    stats.day = day;
+    stats.betaEffective = betaEffective;
+
+    for (const LocalCounts& counts : taskCounts) {
+
+        stats.susceptible += counts.susceptible;
+        stats.infected += counts.infected;
+        stats.recovered += counts.recovered;
+        stats.vaccinated += counts.vaccinated;
+        stats.dead += counts.dead;
+    }
+
+    stats.checksum = calculateChecksum();
+
+    return stats;
 }
-next = current;
-}
 
-
-DailyStats Simulation::simulateDay(int day, double betaEffective) {
-const int n = config.gridSize;
-double probabilities[9];
-
-for(int k =0; k<=8; ++k)
-{
-probabilities[k] = 1.0 - std::pow(1.0 - betaEffective,k ); }
-
-for(int row=0; row<n; ++row){
-for(int col=0; col<n; ++col) {
-const Person& person = current.at(row,col);
-Person& updated = next.at(row,col);
-
-updated = person;
-
-if(person.state == State::Susceptible) {
-int infectedNeighbours = 0;
-
-for(int dr = -1; dr<=1;++dr){
-for(int dc = -1; dc<=1; ++dc) {
-if(dr == 0 && dc == 0){
-continue;
-}
-
-const int r = row +dr;
-const int c= col + dc;
-
-if(r>=0 && r<n && c>=0 && c<n && current.at(r,c).state == State::Infected) {
-++infectedNeighbours;
-}}}
-
-const std::uint64_t id = 
-static_cast<std::uint64_t>(row) * n + col;
-
-const double randomValue = random01(
-config.seed, static_cast<std::uint64_t>(day),id, 0);
-
-if(randomValue < probabilities[infectedNeighbours]) {
-updated.state = State::Infected;
-updated.daysInfected = 0;
-}}
-else if (person.state == State::Infected) {
-updated.daysInfected++;
-
-if(updated.daysInfected >= config.infectiousDays) {
-const std::uint64_t id =
-static_cast<std::uint64_t>(row)* n + col;
-const double randomValue = random01(
-config.seed, static_cast<std::uint64_t>(day),id, 1);
-
-if(randomValue < config.mortality) {
-updated.state = State::Dead;}
-else
-{
-updated.state= State::Recovered; }
-
-updated.daysInfected = 0;
-}}}}
-
-std::swap(current, next);
-
-DailyStats stats;
-stats.day = day;
-stats.betaEffective = betaEffective;
-
-for(int row=0; row<n; ++row) {
-for(int col = 0;col<n; ++col) {
-switch(current.at(row,col).state){
-case State::Susceptible: ++stats.susceptible;
-break;
-case State::Infected: ++stats.infected;
-break;
-case State::Recovered: ++stats.recovered;
-break;
-case State::Vaccinated: ++stats.vaccinated;
-break;
-case State::Dead: ++stats.dead;
-break;
-}}}
-
-stats.checksum = calculateChecksum();
-return stats;
-}
 
 std::uint64_t Simulation::calculateChecksum() const {
-std::uint64_t hash = 14695981039346656037ULL;
-const std::uint64_t prime = 1099511628211ULL;
 
-const int n = config.gridSize;
+    std::uint64_t hash = 14695981039346656037ULL;
+    const std::uint64_t prime = 1099511628211ULL;
 
-for(int row = 0; row<n; ++row) {
-for(int col=0; col<n;++col) {
-const Person& person = current.at(row,col);
+    const int n = config.gridSize;
 
-hash ^= static_cast<std::uint64_t>(person.state);
-hash*= prime;
+    for (int row = 0; row < n; ++row) {
+        for (int col = 0; col < n; ++col) {
 
-hash^= static_cast<std::uint64_t>(person.daysInfected);
-hash*= prime;
-}}
-return hash;
+            const Person& person = current.at(row, col);
+
+            hash ^= static_cast<std::uint64_t>(person.state);
+            hash *= prime;
+
+            hash ^= static_cast<std::uint64_t>(
+                person.daysInfected
+            );
+            hash *= prime;
+        }
+    }
+
+    return hash;
 }
+
 
 void Simulation::run(const std::string& csvFilename) {
-std::ofstream output(csvFilename);
 
-if(!output) {
-throw std::runtime_error("Cannot open CSV output file"); }
+    std::ofstream output(csvFilename);
 
-output<< "day,S,I,R,V,D,beta_eff,checksum\n";
+    if (!output) {
+        throw std::runtime_error(
+            "Cannot open CSV output file"
+        );
+    }
 
-double betaEffective = config.beta * config.maskFactor;
-bool lockdown = false;
+    output << "day,S,I,R,V,D,beta_eff,checksum\n";
 
-DailyStats stats;
-stats.day=0;
-stats.betaEffective = betaEffective;
+    double betaEffective =
+        config.beta * config.maskFactor;
 
-for(int row=0; row<config.gridSize;++row){
-for(int col=0; col<config.gridSize; ++col){
-switch(current.at(row,col).state) {
-case State::Susceptible: ++stats.susceptible; break;
-case State::Infected: ++stats.infected; break;
-case State::Recovered: ++stats.recovered; break;
-case State::Vaccinated: ++stats.vaccinated; break;
-case State::Dead: ++stats.dead; break;
-}}}
+    bool lockdown = false;
 
-stats.checksum = calculateChecksum();
+    DailyStats stats;
+    stats.day = 0;
+    stats.betaEffective = betaEffective;
 
-output<< stats.day<< ',' << stats.susceptible << ',' << stats.infected << ',' <<
-stats.recovered << ',' << stats.vaccinated << ',' << stats.dead << ',' <<
-stats.betaEffective << ',' << stats.checksum <<'\n' ;
+    for (int row = 0; row < config.gridSize; ++row) {
+        for (int col = 0; col < config.gridSize; ++col) {
 
-for(int day=1; day<=config.maxDays; ++day) {
-stats = simulateDay (day,betaEffective);
+            countState(
+                *reinterpret_cast<LocalCounts*>(&stats),
+                current.at(row, col).state
+            );
+        }
+    }
 
-output << stats.day <<',' <<stats.susceptible << ',' << stats.infected << ',' <<
-stats.recovered << ',' << stats.vaccinated << ',' <<stats.dead <<',' << 
-stats.betaEffective<< ',' << stats.checksum<< '\n';
+    output << stats.day << ','
+           << stats.susceptible << ','
+           << stats.infected << ','
+           << stats.recovered << ','
+           << stats.vaccinated << ','
+           << stats.dead << ','
+           << stats.betaEffective << ','
+           << calculateChecksum() << '\n';
 
+    for (int day = 1; day <= config.maxDays; ++day) {
 
-const double infectedFraction = static_cast<double>(stats.infected) /
-(static_cast<double>(config.gridSize) * config.gridSize);
+        stats = simulateDay(day, betaEffective);
 
-if(!lockdown && infectedFraction > config.lockdownOn) {
-lockdown = true;
-betaEffective = config.beta * config.maskFactor * config.lockdownFactor;}
-else if(lockdown && infectedFraction < config.lockdownOff) {
-lockdown = false;
-betaEffective = config.beta * config.maskFactor; }
+        output << stats.day << ','
+               << stats.susceptible << ','
+               << stats.infected << ','
+               << stats.recovered << ','
+               << stats.vaccinated << ','
+               << stats.dead << ','
+               << stats.betaEffective << ','
+               << stats.checksum << '\n';
 
-if(stats.infected == 0) {
-break;
-}}
+        const double infectedFraction =
+            static_cast<double>(stats.infected) /
+            (static_cast<double>(config.gridSize) *
+             config.gridSize);
 
-std:: cout <<"Simulation completed. CSV saved to : " << csvFilename<< '\n';
+        if (!lockdown &&
+            infectedFraction > config.lockdownOn) {
+
+            lockdown = true;
+
+            betaEffective =
+                config.beta *
+                config.maskFactor *
+                config.lockdownFactor;
+        }
+        else if (lockdown &&
+                 infectedFraction < config.lockdownOff) {
+
+            lockdown = false;
+
+            betaEffective =
+                config.beta * config.maskFactor;
+        }
+
+        if (stats.infected == 0) {
+            break;
+        }
+    }
+
+    std::cout
+        << "Simulation completed. CSV saved to: "
+        << csvFilename << '\n';
 }
-
-
-
-
-
-
