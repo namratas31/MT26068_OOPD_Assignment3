@@ -1,2 +1,11 @@
-# MT26068_OOPD_Assignment3
-Parallel and Asynchronous Simulation of Pandemic Spread
+# Part B – Threaded Implementation
+
+This branch extends the sequential pandemic simulation with multithreading.
+
+It implements two parallel execution approaches:
+- Thread-per-day
+- Fixed-size thread pool
+
+It supports three grid division strategies: row strips, square blocks, and interleaved rows.
+
+Deterministic random-number generation ensures consistent simulation results across different thread configurations.
